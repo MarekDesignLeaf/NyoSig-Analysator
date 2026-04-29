@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 NyoSig Analysator — Web API (FastAPI)
 Wraps core v7.5c as REST endpoints for Streamlit dashboard.
@@ -45,7 +45,7 @@ paths = _core.make_paths(PROJECT_ROOT)
 for d in [paths.cache_dir, paths.log_dir, paths.data_dir, paths.db_dir]:
     _core.ensure_dir(d)
 
-APP_VERSION = "v7.5d-web"
+APP_VERSION = "v7.5e-web"
 
 # --- FastAPI app ---
 app = FastAPI(
@@ -236,7 +236,7 @@ def analyse(req: AnalyseRequest, background_tasks: BackgroundTasks):
         _pipeline_state["status"] = "analysing"
         try:
             with get_db() as con:
-                scopes = [lr["scope_key"] for lr in _core.LAYER_REGISTRY]
+                scopes = [lr["scope_key"] for lr in LAYER_REGISTRY]
                 res = _core.prepare_and_store_composite_preview(
                     con, req.selection_id, scopes, run_id=req.run_id)
                 # Generate predictions + trade plans
@@ -871,3 +871,4 @@ if __name__ == "__main__":
         print(f"  {_r}")
     print(f"Docs: http://localhost:8000/docs")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
