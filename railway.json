@@ -1,4 +1,4 @@
-{
+﻿{
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS"
@@ -6,8 +6,9 @@
   "deploy": {
     "startCommand": "bash start.sh",
     "healthcheckPath": "/",
-    "healthcheckTimeout": 30,
+    "healthcheckTimeout": 180,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
   }
 }
+
