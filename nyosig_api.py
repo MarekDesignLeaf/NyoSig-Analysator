@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 NyoSig Analysator — Web API (FastAPI)
 Wraps core v7.5c as REST endpoints for Streamlit dashboard.
@@ -45,7 +45,7 @@ paths = _core.make_paths(PROJECT_ROOT)
 for d in [paths.cache_dir, paths.log_dir, paths.data_dir, paths.db_dir]:
     _core.ensure_dir(d)
 
-APP_VERSION = "v7.5e-web"
+APP_VERSION = "v7.5f-web"
 
 # --- FastAPI app ---
 app = FastAPI(
@@ -229,34 +229,62 @@ class AnalyseRequest(BaseModel):
     selection_id: int
     run_id: Optional[int] = None
 
+
 @app.post("/analyse")
 def analyse(req: AnalyseRequest, background_tasks: BackgroundTasks):
     def _run():
         _pipeline_state["running"] = True
         _pipeline_state["status"] = "analysing"
+        _pipeline_state["result"] = None
+        _log(f"ANALYSE START run_id={req.run_id} selection_id={req.selection_id}")
         try:
             with get_db() as con:
                 scopes = [lr["scope_key"] for lr in LAYER_REGISTRY]
+                _log("ANALYSE scopes=" + ",".join(scopes))
+
                 res = _core.prepare_and_store_composite_preview(
                     con, req.selection_id, scopes, run_id=req.run_id)
-                # Generate predictions + trade plans
+                updated = res.get("updated_items", 0) if isinstance(res, dict) else 0
+                layers_n = len(res.get("scopes", [])) if isinstance(res, dict) else 0
+                _log(f"ANALYSE composite updated={updated} layers={layers_n}")
+
                 if req.run_id:
+                    _log("ANALYSE storing feature vectors")
                     _core.persist_feature_vectors(con, req.run_id, req.selection_id)
+
+                    _log("ANALYSE storing predictions")
                     _core.persist_predictions(con, req.run_id, req.selection_id)
+
+                    _log("ANALYSE storing trade plans")
                     _core.persist_trade_plans(con, req.run_id, req.selection_id)
+
+                pred_count = len(_core.load_predictions(con, req.run_id, req.selection_id)) if req.run_id else 0
+                feature_count = len(_core.load_feature_vectors_for_view(con, req.run_id, req.selection_id)) if req.run_id else 0
+                plan_count = len(_core.load_trade_plans(con, req.run_id, req.selection_id)) if req.run_id else 0
+
             _pipeline_state["status"] = "done"
             _pipeline_state["result"] = {
-                "updated": res.get("updated_items", 0),
-                "layers": len(res.get("scopes", [])),
+                "updated": updated,
+                "layers": layers_n,
+                "feature_vectors": feature_count,
+                "predictions": pred_count,
+                "trade_plans": plan_count,
             }
+            _log(f"ANALYSE DONE features={feature_count} predictions={pred_count} trade_plans={plan_count}")
+
         except Exception as e:
+            import traceback
+            err = traceback.format_exc()
+            print("ANALYSE FAILED:", err, flush=True)
+            _log("ANALYSE FAILED: " + str(e)[:500])
             _pipeline_state["status"] = "failed"
-            _pipeline_state["result"] = {"error": str(e)[:500]}
+            _pipeline_state["result"] = {"error": str(e)[:1000]}
         finally:
             _pipeline_state["running"] = False
 
     background_tasks.add_task(_run)
-    return {"status": "started"}
+    return {"status": "started", "run_id": req.run_id, "selection_id": req.selection_id}
+
 
 # --- Results ---
 @app.get("/runs")
