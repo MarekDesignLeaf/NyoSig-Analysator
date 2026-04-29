@@ -269,7 +269,7 @@ elif "Predictions" in page:
 
                     if "signal" in display_df.columns:
                         st.dataframe(
-                            display_df.style.applymap(signal_color, subset=["signal"]),
+                            display_df.style.map(signal_color, subset=["signal"]),
                             use_container_width=True, height=500)
                     else:
                         st.warning("Predictions were returned, but the signal column is missing. Showing raw prediction data.")
