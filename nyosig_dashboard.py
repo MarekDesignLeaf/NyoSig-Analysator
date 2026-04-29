@@ -265,9 +265,15 @@ elif "Predictions" in page:
 
                     display_cols = ["symbol", "signal", "confidence", "structural_avg", "rule"]
                     available = [c for c in display_cols if c in df.columns]
-                    st.dataframe(
-                        df[available].style.applymap(signal_color, subset=["signal"]),
-                        use_container_width=True, height=500)
+                    display_df = df[available] if available else df
+
+                    if "signal" in display_df.columns:
+                        st.dataframe(
+                            display_df.style.applymap(signal_color, subset=["signal"]),
+                            use_container_width=True, height=500)
+                    else:
+                        st.warning("Predictions were returned, but the signal column is missing. Showing raw prediction data.")
+                        st.dataframe(display_df, use_container_width=True, height=500)
 
                     # Signal summary chart
                     if "signal" in df.columns:
