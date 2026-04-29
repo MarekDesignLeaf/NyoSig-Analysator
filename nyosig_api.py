@@ -7,7 +7,7 @@ Install: pip install fastapi uvicorn
 Run:     python nyosig_api.py
          or: uvicorn nyosig_api:app --host 0.0.0.0 --port 8000 --reload
 """
-import os, sys, json, threading
+import os, sys, json, threading, sqlite3, time
 from contextlib import contextmanager
 
 # --- Load core ---
@@ -45,7 +45,7 @@ paths = _core.make_paths(PROJECT_ROOT)
 for d in [paths.cache_dir, paths.log_dir, paths.data_dir, paths.db_dir]:
     _core.ensure_dir(d)
 
-APP_VERSION = "v7.5c-web"
+APP_VERSION = "v7.5d-web"
 
 # --- FastAPI app ---
 app = FastAPI(
@@ -57,10 +57,47 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
 # --- DB helper ---
+_DB_SCHEMA_READY = False
+_DB_SCHEMA_LOCK = threading.RLock()
+
+def _db_connect_safe(db_path: str) -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    con = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
+    con.execute("PRAGMA busy_timeout=30000;")
+    con.execute("PRAGMA journal_mode=WAL;")
+    con.execute("PRAGMA foreign_keys=ON;")
+    return con
+
+_core.db_connect = _db_connect_safe
+
+def _is_db_locked(exc: Exception) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+def _ensure_schema_once(con: sqlite3.Connection) -> None:
+    global _DB_SCHEMA_READY
+    if _DB_SCHEMA_READY:
+        return
+    with _DB_SCHEMA_LOCK:
+        if _DB_SCHEMA_READY:
+            return
+        last_exc = None
+        for attempt in range(6):
+            try:
+                _core.ensure_schema(con)
+                _DB_SCHEMA_READY = True
+                return
+            except sqlite3.OperationalError as exc:
+                if not _is_db_locked(exc):
+                    raise
+                last_exc = exc
+                time.sleep(min(0.5 * (attempt + 1), 3.0))
+        raise last_exc or sqlite3.OperationalError("database is locked")
+
 @contextmanager
-def get_db():
+def get_db(ensure_schema: bool = True):
     con = _core.db_connect(paths.db_path)
-    _core.ensure_schema(con)
+    if ensure_schema:
+        _ensure_schema_once(con)
     try:
         yield con
     finally:
@@ -89,9 +126,19 @@ def root():
 
 @app.get("/health")
 def health():
-    with get_db() as con:
-        h = _core.system_health_check(con)
-    return h
+    try:
+        with get_db() as con:
+            h = _core.system_health_check(con)
+        return h
+    except sqlite3.OperationalError as exc:
+        if _is_db_locked(exc):
+            return {
+                "status": "busy",
+                "version": APP_VERSION,
+                "detail": "SQLite database is temporarily locked by a running pipeline. Retry shortly.",
+                "project_root": PROJECT_ROOT,
+            }
+        raise
 
 # --- Scopes ---
 @app.get("/scopes")
@@ -703,39 +750,49 @@ def automat_candidates(selection_id: Optional[int] = None):
     """Get current candidates with all columns for sorting/selection UI."""
     if not _HAS_AUTOMAT:
         return []
-    with get_db() as con:
-        if not selection_id:
-            row = con.execute(
-                "SELECT selection_id FROM topnow_selection ORDER BY selection_id DESC LIMIT 1;").fetchone()
-            if not row:
-                return []
-            selection_id = row[0]
-        snap = con.execute(
-            "SELECT snapshot_id FROM topnow_selection WHERE selection_id=?;",
-            (selection_id,)).fetchone()
-        snap_id = snap[0] if snap else None
-        items = con.execute(
-            "SELECT rank_in_selection, unified_symbol, composite_preview "
-            "FROM topnow_selection_items WHERE selection_id=? "
-            "ORDER BY rank_in_selection;", (selection_id,)).fetchall()
-        market = {}
-        if snap_id:
-            for m in con.execute(
-                "SELECT unified_symbol, price, mcap, vol24, change_24h_pct, rank, base_score "
-                "FROM market_snapshots WHERE snapshot_id=? AND timeframe='spot';",
-                (snap_id,)).fetchall():
-                market[m[0]] = {"price": m[1], "mcap": m[2], "vol24": m[3],
-                                "chg24": m[4], "mkt_rank": m[5], "base_score": m[6]}
-    result = []
-    for rank, sym, comp in items:
-        m = market.get(sym, {})
-        result.append({
-            "rank": rank, "symbol": sym, "composite": comp or 0,
-            "price": m.get("price", 0), "mcap": m.get("mcap", 0),
-            "vol24": m.get("vol24", 0), "chg24": m.get("chg24", 0),
-            "mkt_rank": m.get("mkt_rank", 0), "base_score": m.get("base_score", 0),
-        })
-    return result
+    try:
+        with get_db() as con:
+            if not selection_id:
+                row = con.execute(
+                    "SELECT selection_id FROM topnow_selection ORDER BY selection_id DESC LIMIT 1;").fetchone()
+                if not row:
+                    return []
+                selection_id = row[0]
+            snap = con.execute(
+                "SELECT snapshot_id FROM topnow_selection WHERE selection_id=?;",
+                (selection_id,)).fetchone()
+            snap_id = snap[0] if snap else None
+            items = con.execute(
+                "SELECT rank_in_selection, unified_symbol, composite_preview "
+                "FROM topnow_selection_items WHERE selection_id=? "
+                "ORDER BY rank_in_selection;", (selection_id,)).fetchall()
+            market = {}
+            if snap_id:
+                for m in con.execute(
+                    "SELECT unified_symbol, price, mcap, vol24, change_24h_pct, rank, base_score "
+                    "FROM market_snapshots WHERE snapshot_id=? AND timeframe='spot';",
+                    (snap_id,)).fetchall():
+                    market[m[0]] = {"price": m[1], "mcap": m[2], "vol24": m[3],
+                                    "chg24": m[4], "mkt_rank": m[5], "base_score": m[6]}
+        result = []
+        for rank, sym, comp in items:
+            m = market.get(sym, {})
+            result.append({
+                "rank": rank, "symbol": sym, "composite": comp or 0,
+                "price": m.get("price", 0), "mcap": m.get("mcap", 0),
+                "vol24": m.get("vol24", 0), "chg24": m.get("chg24", 0),
+                "mkt_rank": m.get("mkt_rank", 0), "base_score": m.get("base_score", 0),
+            })
+        return result
+    except sqlite3.OperationalError as exc:
+        if _is_db_locked(exc):
+            _log("AUTOMAT candidates skipped: database locked")
+            return []
+        raise
+    except Exception as exc:
+        _log("AUTOMAT candidates error: " + str(exc)[:200])
+        return []
+
 
 
 # --- Analytics Log ---
