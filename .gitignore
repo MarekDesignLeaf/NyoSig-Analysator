@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+db/
+cache/
+logs/
+config/secrets.env
+config/api_keys.json
+*.db
+*.db-journal
+*.db-wal
+.env

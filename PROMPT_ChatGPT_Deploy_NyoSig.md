@@ -14,7 +14,7 @@ C:\Users\hutra\AppData\Local\NyoSig\NyoSig_Analysator\app\versions\
 
 | Soubor | Velikost | Účel |
 |--------|----------|------|
-| `nyosig_analysator_core_v7.5a.py` | 286 KB | Core engine — 13 analytických vrstev, 28 DB tabulek, SQLite |
+| `nyosig_analysator_core_v7.5c.py` | 286 KB | Core engine — 13 analytických vrstev, 28 DB tabulek, SQLite |
 | `nyosig_api.py` | 30 KB | FastAPI REST backend — 48+ endpointů |
 | `nyosig_dashboard.py` | 63 KB | Streamlit web dashboard — 13 stránek, Plotly grafy |
 | `nyosig_ai_commentator.py` | 14 KB | AI report generátor (Claude/GPT/Gemini + rule-based fallback) |
@@ -27,7 +27,7 @@ C:\Users\hutra\AppData\Local\NyoSig\NyoSig_Analysator\app\versions\
 
 1. **FastAPI backend** (`nyosig_api.py`) běží na portu 8000, importuje core a všechny moduly
 2. **Streamlit dashboard** (`nyosig_dashboard.py`) běží na portu 8501, volá API přes HTTP
-3. **Core** (`nyosig_analysator_core_v7.5a.py`) obsahuje veškerou business logiku, SQLite databázi
+3. **Core** (`nyosig_analysator_core_v7.5c.py`) obsahuje veškerou business logiku, SQLite databázi
 4. Aplikace stahuje data z free API (CoinGecko, Yahoo Finance, Binance, GitHub, FRED, Blockchair)
 5. Lokálně otestováno na Windows — 64/65 testů prošlo
 

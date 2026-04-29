@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 NyoSig Analysator — Web API (FastAPI)
-Wraps core v7.5a as REST endpoints for Streamlit dashboard.
+Wraps core v7.5c as REST endpoints for Streamlit dashboard.
 
 Install: pip install fastapi uvicorn
 Run:     python nyosig_api.py
@@ -16,7 +16,7 @@ sys.path.insert(0, SCRIPT_DIR)
 
 # Find core module
 _core = None
-for name in ["nyosig_analysator_core_v7.5a.py", "nyosig_analysator_core_v8.0a.py"]:
+for name in ["nyosig_analysator_core_v7.5c.py", "nyosig_analysator_core_v7.5a.py", "nyosig_analysator_core_v8.0a.py"]:
     p = os.path.join(SCRIPT_DIR, name)
     if os.path.isfile(p):
         import importlib.util
@@ -45,7 +45,7 @@ paths = _core.make_paths(PROJECT_ROOT)
 for d in [paths.cache_dir, paths.log_dir, paths.data_dir, paths.db_dir]:
     _core.ensure_dir(d)
 
-APP_VERSION = "v8.1-web"
+APP_VERSION = "v7.5c-web"
 
 # --- FastAPI app ---
 app = FastAPI(
@@ -141,6 +141,26 @@ def run_pipeline(req: PipelineRequest, background_tasks: BackgroundTasks):
                 "selection_id": res.selection_id,
                 "candidates_n": res.candidates_n,
             }
+            try:
+                if _HAS_ANALYTICS and _analytics:
+                    profile_id = _analytics.start_run_profile(
+                        res.run_id, APP_VERSION, req.scope,
+                        config=req.model_dump() if hasattr(req, "model_dump") else req.dict())
+                    op_id = _analytics.start_operation(
+                        "pipeline_snapshot", "pipeline", run_id=res.run_id,
+                        input_params=req.model_dump() if hasattr(req, "model_dump") else req.dict())
+                    _analytics.end_operation(
+                        op_id, status="ok",
+                        output_summary=_pipeline_state["result"],
+                        items_processed=res.candidates_n,
+                        db_writes=res.candidates_n)
+                    _analytics.end_run_profile(
+                        profile_id, "completed",
+                        candidates_n=res.candidates_n,
+                        summary=_pipeline_state["result"])
+                    _analytics.compute_daily_summary()
+            except Exception as _analytics_exc:
+                _log(f"ANALYTICS WARN: {_analytics_exc}")
             _pipeline_state["status"] = "done"
             _log(f"DONE run_id={res.run_id} candidates={res.candidates_n}")
         except Exception as e:
@@ -169,7 +189,7 @@ def analyse(req: AnalyseRequest, background_tasks: BackgroundTasks):
         _pipeline_state["status"] = "analysing"
         try:
             with get_db() as con:
-                scopes = [lr["scope_key"] for lr in LAYER_REGISTRY]
+                scopes = [lr["scope_key"] for lr in _core.LAYER_REGISTRY]
                 res = _core.prepare_and_store_composite_preview(
                     con, req.selection_id, scopes, run_id=req.run_id)
                 # Generate predictions + trade plans

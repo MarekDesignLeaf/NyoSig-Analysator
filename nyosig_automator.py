@@ -438,7 +438,7 @@ def run_server_mode(core_module, project_root, db_path, config=None):
 
 if __name__ == "__main__":
     # Load core
-    for name in ["nyosig_analysator_core_v7.5a.py", "nyosig_analysator_core_v8.0a.py"]:
+    for name in ["nyosig_analysator_core_v7.5c.py", "nyosig_analysator_core_v7.5a.py", "nyosig_analysator_core_v8.0a.py"]:
         p = os.path.join(SCRIPT_DIR, name)
         if os.path.isfile(p):
             import importlib.util
