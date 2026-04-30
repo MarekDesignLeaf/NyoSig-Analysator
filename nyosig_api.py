@@ -45,7 +45,7 @@ paths = _core.make_paths(PROJECT_ROOT)
 for d in [paths.cache_dir, paths.log_dir, paths.data_dir, paths.db_dir]:
     _core.ensure_dir(d)
 
-APP_VERSION = "v7.5f-web"
+APP_VERSION = "v7.5i-web"
 
 # --- FastAPI app ---
 app = FastAPI(
@@ -456,29 +456,69 @@ try:
 except ImportError:
     _HAS_AI = False
 
+
 @app.get("/ai/report/{run_id}")
 def ai_report(run_id: int, selection_id: Optional[int] = None, multi: bool = False):
-    """Generate AI market intelligence report from run data."""
-    with get_db() as con:
-        summary = _core.run_summary(con, run_id, selection_id)
-        preds = _core.load_predictions(con, run_id, selection_id)
-        plans = _core.load_trade_plans(con, run_id, selection_id)
-        feats = _core.load_feature_vectors_for_view(con, run_id, selection_id)
-        cors = _core.cross_scope_correlation(con, run_id)
-        risk = _core.compute_portfolio_risk(con)
+    """Generate AI market intelligence report from run data.
 
-    if not _HAS_AI:
-        from nyosig_ai_commentator import _generate_fallback_report
-        return {"report": _generate_fallback_report(summary, preds, cors),
-                "model": "fallback", "error": "AI commentator not loaded"}
+    Defensive endpoint. Provider/package failures are returned as JSON,
+    not as HTTP 500 dashboard crashes.
+    """
+    try:
+        with get_db() as con:
+            summary = _core.run_summary(con, run_id, selection_id) or {}
+            preds = _core.load_predictions(con, run_id, selection_id) or []
+            plans = _core.load_trade_plans(con, run_id, selection_id) or []
+            feats = _core.load_feature_vectors_for_view(con, run_id, selection_id) or []
+            cors = _core.cross_scope_correlation(con, run_id) or []
+            try:
+                risk = _core.compute_portfolio_risk(con) or {}
+            except Exception as risk_exc:
+                print("AI REPORT RISK WARN:", str(risk_exc), flush=True)
+                risk = {"warning": str(risk_exc)[:300]}
 
-    scope = summary.get("scope", "crypto_spot")
-    if multi:
-        return generate_multi_ai_commentary(
-            summary, preds, plans, feats, cors, risk, scope)
-    else:
+        if not _HAS_AI:
+            try:
+                from nyosig_ai_commentator import _generate_fallback_report
+                return {
+                    "report": _generate_fallback_report(summary, preds, cors),
+                    "model": "fallback_rule_based",
+                    "error": "AI commentator module not loaded",
+                }
+            except Exception as fallback_exc:
+                return {
+                    "report": "AI report could not be generated. Fallback report also failed.",
+                    "model": "fallback_error",
+                    "error": str(fallback_exc)[:500],
+                }
+
+        scope = summary.get("scope", "crypto_spot") if isinstance(summary, dict) else "crypto_spot"
+
+        if multi:
+            result = generate_multi_ai_commentary(
+                summary, preds, plans, feats, cors, risk, scope)
+            if isinstance(result, dict) and "ensemble_report" in result and "report" not in result:
+                result["report"] = result.get("ensemble_report", "")
+            return result
+
         return generate_ai_commentary(
             summary, preds, plans, feats, cors, risk, scope)
+
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        print("AI REPORT FAILED:", err, flush=True)
+        try:
+            from nyosig_ai_commentator import _generate_fallback_report
+            fallback = _generate_fallback_report({}, [], [])
+        except Exception:
+            fallback = "AI report failed before structured data could be interpreted."
+        return {
+            "report": fallback,
+            "model": "fallback_error",
+            "error": str(e)[:1000],
+            "trace_tail": err[-2000:],
+        }
 
 
 # --- Paper Trading ---
@@ -667,45 +707,128 @@ def delete_key(provider: str):
     _save_keys(keys)
     return {"status": "deleted", "provider": provider}
 
+
 @app.post("/keys/{provider}/test")
 def test_key(provider: str):
-    """Quick test if the API key works."""
+    """Test API key without requiring provider SDK packages.
+
+    Uses HTTP requests directly so the test buttons work even before AI SDKs
+    are used by the report generator.
+    """
     saved = _load_keys()
+    provider = provider.lower().strip()
+
+    if provider not in _SUPPORTED_PROVIDERS:
+        return {
+            "status": "error",
+            "message": "Unknown provider: " + provider,
+        }
+
     key = saved.get(provider, "") or os.environ.get(
-        _SUPPORTED_PROVIDERS.get(provider, {}).get("env_var", ""), "")
+        _SUPPORTED_PROVIDERS[provider].get("env_var", ""), "")
+
     if not key:
         return {"status": "no_key", "message": "No key set for " + provider}
+
     try:
+        import requests
+
+        if provider == "github":
+            r = requests.get(
+                "https://api.github.com/rate_limit",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "User-Agent": "NyoSig",
+                    "Accept": "application/vnd.github+json",
+                },
+                timeout=15,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                limit = data.get("resources", {}).get("core", {}).get("limit", 0)
+                remaining = data.get("resources", {}).get("core", {}).get("remaining", 0)
+                return {
+                    "status": "ok",
+                    "message": f"GitHub token valid. Limit: {limit}/hr, remaining: {remaining}",
+                }
+            return {
+                "status": "error",
+                "message": f"GitHub test failed HTTP {r.status_code}: {r.text[:300]}",
+            }
+
+        if provider == "openai":
+            r = requests.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                return {"status": "ok", "message": "OpenAI API key valid"}
+            return {
+                "status": "error",
+                "message": f"OpenAI test failed HTTP {r.status_code}: {r.text[:300]}",
+            }
+
         if provider == "anthropic":
-            import anthropic
-            c = anthropic.Anthropic(api_key=key)
-            r = c.messages.create(model="claude-sonnet-4-20250514", max_tokens=10,
-                                   messages=[{"role": "user", "content": "Say OK"}])
-            return {"status": "ok", "message": "Claude API working", "response": r.content[0].text[:50]}
-        elif provider == "openai":
-            import openai
-            c = openai.OpenAI(api_key=key)
-            r = c.chat.completions.create(model="gpt-4o-mini", max_tokens=10,
-                                           messages=[{"role": "user", "content": "Say OK"}])
-            return {"status": "ok", "message": "OpenAI API working", "response": r.choices[0].message.content[:50]}
-        elif provider == "gemini":
-            import google.generativeai as genai
-            genai.configure(api_key=key)
-            m = genai.GenerativeModel("gemini-2.0-flash")
-            r = m.generate_content("Say OK")
-            return {"status": "ok", "message": "Gemini API working", "response": r.text[:50]}
-        elif provider == "github":
-            import urllib.request
-            req = urllib.request.Request("https://api.github.com/rate_limit",
-                headers={"Authorization": f"token {key}", "User-Agent": "NyoSig"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-            limit = data.get("resources", {}).get("core", {}).get("limit", 0)
-            return {"status": "ok", "message": f"GitHub token valid (limit: {limit}/hr)"}
-        else:
-            return {"status": "unknown", "message": f"No test available for {provider}"}
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 8,
+                    "messages": [{"role": "user", "content": "Say OK"}],
+                },
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return {"status": "ok", "message": "Claude API key valid"}
+            return {
+                "status": "error",
+                "message": f"Claude test failed HTTP {r.status_code}: {r.text[:300]}",
+            }
+
+        if provider == "gemini":
+            r = requests.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                params={"key": key},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                return {"status": "ok", "message": "Gemini API key valid"}
+            return {
+                "status": "error",
+                "message": f"Gemini test failed HTTP {r.status_code}: {r.text[:300]}",
+            }
+
+        if provider == "grok":
+            r = requests.post(
+                "https://api.x.ai/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "grok-4.20-reasoning",
+                    "input": "Say OK",
+                },
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return {"status": "ok", "message": "Grok xAI API key valid"}
+            return {
+                "status": "error",
+                "message": f"Grok test failed HTTP {r.status_code}: {r.text[:300]}",
+            }
+
+        return {"status": "unknown", "message": f"No test available for {provider}"}
+
     except Exception as e:
-        return {"status": "error", "message": str(e)[:200]}
+        return {"status": "error", "message": str(e)[:500]}
+
 
 
 # --- Automation Engine ---
