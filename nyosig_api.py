@@ -45,7 +45,7 @@ paths = _core.make_paths(PROJECT_ROOT)
 for d in [paths.cache_dir, paths.log_dir, paths.data_dir, paths.db_dir]:
     _core.ensure_dir(d)
 
-APP_VERSION = "v7.5i-web"
+APP_VERSION = "v7.6b-web"
 
 # --- FastAPI app ---
 app = FastAPI(
@@ -638,11 +638,16 @@ def _save_keys(keys: dict):
         json.dump(keys, f, indent=2)
 
 def _apply_keys_to_env():
-    """Load saved keys and set as environment variables."""
+    """Load file fallback keys only when the real environment variable is missing.
+
+    Railway Variables are the primary source of truth.
+    config/api_keys.json is only a local fallback and must never override Railway.
+    """
     keys = _load_keys()
     for provider, info in _SUPPORTED_PROVIDERS.items():
-        if provider in keys and keys[provider]:
-            os.environ[info["env_var"]] = keys[provider]
+        env_var = info["env_var"]
+        if not os.environ.get(env_var) and provider in keys and keys[provider]:
+            os.environ[env_var] = keys[provider]
 
 # Apply saved keys on startup
 try:
@@ -655,16 +660,30 @@ def _mask_key(key: str) -> str:
         return "****"
     return key[:6] + "..." + key[-4:]
 
+
+def _get_key(provider: str):
+    """Return (key, source). Source is railway_env, file_fallback, or missing."""
+    provider = (provider or "").lower().strip()
+    if provider not in _SUPPORTED_PROVIDERS:
+        return "", "missing"
+    info = _SUPPORTED_PROVIDERS[provider]
+    env_value = os.environ.get(info["env_var"], "").strip()
+    if env_value:
+        return env_value, "railway_env"
+    saved = _load_keys()
+    file_value = (saved.get(provider, "") or "").strip()
+    if file_value:
+        return file_value, "file_fallback"
+    return "", "missing"
+
 class KeyInput(BaseModel):
     key: str
 
 @app.get("/keys")
 def list_keys():
-    """List all API key providers with status (set/not set, masked preview)."""
-    saved = _load_keys()
     result = []
     for provider, info in _SUPPORTED_PROVIDERS.items():
-        key = saved.get(provider, "") or os.environ.get(info["env_var"], "")
+        key, source = _get_key(provider)
         result.append({
             "provider": provider,
             "label": info["label"],
@@ -672,63 +691,64 @@ def list_keys():
             "preview": _mask_key(key) if key else "",
             "env_var": info["env_var"],
             "expected_prefix": info["prefix"],
+            "source": source,
+            "persistent": source == "railway_env",
         })
     return result
 
 @app.post("/keys/{provider}")
 def set_key(provider: str, body: KeyInput):
-    """Save an API key for a provider."""
+    provider = provider.lower().strip()
     if provider not in _SUPPORTED_PROVIDERS:
-        raise HTTPException(400, f"Unknown provider: {provider}. "
-                                  f"Supported: {list(_SUPPORTED_PROVIDERS.keys())}")
+        raise HTTPException(400, f"Unknown provider: {provider}. Supported: {list(_SUPPORTED_PROVIDERS.keys())}")
     key = body.key.strip()
     if not key:
         raise HTTPException(400, "Key cannot be empty")
+
     info = _SUPPORTED_PROVIDERS[provider]
-    # Set in env immediately
     os.environ[info["env_var"]] = key
-    # Persist to file
+
     keys = _load_keys()
     keys[provider] = key
     _save_keys(keys)
-    return {"status": "saved", "provider": provider, "preview": _mask_key(key)}
+
+    return {
+        "status": "saved_runtime_fallback",
+        "provider": provider,
+        "preview": _mask_key(key),
+        "env_var": info["env_var"],
+        "warning": "Saved to runtime fallback file only. For persistent Railway storage, set this key in Railway Variables.",
+    }
 
 @app.delete("/keys/{provider}")
 def delete_key(provider: str):
-    """Delete a saved API key."""
+    provider = provider.lower().strip()
     if provider not in _SUPPORTED_PROVIDERS:
         raise HTTPException(400, f"Unknown provider: {provider}")
-    info = _SUPPORTED_PROVIDERS[provider]
-    # Remove from env
-    os.environ.pop(info["env_var"], None)
-    # Remove from file
+
     keys = _load_keys()
     keys.pop(provider, None)
     _save_keys(keys)
-    return {"status": "deleted", "provider": provider}
 
+    key, source = _get_key(provider)
+    return {
+        "status": "file_fallback_deleted",
+        "provider": provider,
+        "still_available": bool(key),
+        "source": source,
+        "note": "Railway Variables cannot be removed from inside the app. Remove them in Railway Variables if required.",
+    }
 
 @app.post("/keys/{provider}/test")
 def test_key(provider: str):
-    """Test API key without requiring provider SDK packages.
-
-    Uses HTTP requests directly so the test buttons work even before AI SDKs
-    are used by the report generator.
-    """
-    saved = _load_keys()
     provider = provider.lower().strip()
 
     if provider not in _SUPPORTED_PROVIDERS:
-        return {
-            "status": "error",
-            "message": "Unknown provider: " + provider,
-        }
+        return {"status": "error", "message": "Unknown provider: " + provider}
 
-    key = saved.get(provider, "") or os.environ.get(
-        _SUPPORTED_PROVIDERS[provider].get("env_var", ""), "")
-
+    key, source = _get_key(provider)
     if not key:
-        return {"status": "no_key", "message": "No key set for " + provider}
+        return {"status": "no_key", "message": "No key set for " + provider, "source": source}
 
     try:
         import requests
@@ -747,27 +767,14 @@ def test_key(provider: str):
                 data = r.json()
                 limit = data.get("resources", {}).get("core", {}).get("limit", 0)
                 remaining = data.get("resources", {}).get("core", {}).get("remaining", 0)
-                return {
-                    "status": "ok",
-                    "message": f"GitHub token valid. Limit: {limit}/hr, remaining: {remaining}",
-                }
-            return {
-                "status": "error",
-                "message": f"GitHub test failed HTTP {r.status_code}: {r.text[:300]}",
-            }
+                return {"status": "ok", "message": f"GitHub token valid. Limit: {limit}/hr, remaining: {remaining}", "source": source}
+            return {"status": "error", "message": f"GitHub test failed HTTP {r.status_code}: {r.text[:300]}", "source": source}
 
         if provider == "openai":
-            r = requests.get(
-                "https://api.openai.com/v1/models",
-                headers={"Authorization": f"Bearer {key}"},
-                timeout=20,
-            )
+            r = requests.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {key}"}, timeout=20)
             if r.status_code == 200:
-                return {"status": "ok", "message": "OpenAI API key valid"}
-            return {
-                "status": "error",
-                "message": f"OpenAI test failed HTTP {r.status_code}: {r.text[:300]}",
-            }
+                return {"status": "ok", "message": "OpenAI API key valid", "source": source}
+            return {"status": "error", "message": f"OpenAI test failed HTTP {r.status_code}: {r.text[:300]}", "source": source}
 
         if provider == "anthropic":
             r = requests.post(
@@ -785,51 +792,30 @@ def test_key(provider: str):
                 timeout=30,
             )
             if r.status_code == 200:
-                return {"status": "ok", "message": "Claude API key valid"}
-            return {
-                "status": "error",
-                "message": f"Claude test failed HTTP {r.status_code}: {r.text[:300]}",
-            }
+                return {"status": "ok", "message": "Claude API key valid", "source": source}
+            return {"status": "error", "message": f"Claude test failed HTTP {r.status_code}: {r.text[:300]}", "source": source}
 
         if provider == "gemini":
-            r = requests.get(
-                "https://generativelanguage.googleapis.com/v1beta/models",
-                params={"key": key},
-                timeout=20,
-            )
+            r = requests.get("https://generativelanguage.googleapis.com/v1beta/models", params={"key": key}, timeout=20)
             if r.status_code == 200:
-                return {"status": "ok", "message": "Gemini API key valid"}
-            return {
-                "status": "error",
-                "message": f"Gemini test failed HTTP {r.status_code}: {r.text[:300]}",
-            }
+                return {"status": "ok", "message": "Gemini API key valid", "source": source}
+            return {"status": "error", "message": f"Gemini test failed HTTP {r.status_code}: {r.text[:300]}", "source": source}
 
         if provider == "grok":
             r = requests.post(
                 "https://api.x.ai/v1/responses",
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "grok-4.20-reasoning",
-                    "input": "Say OK",
-                },
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": "grok-4.20-reasoning", "input": "Say OK"},
                 timeout=30,
             )
             if r.status_code == 200:
-                return {"status": "ok", "message": "Grok xAI API key valid"}
-            return {
-                "status": "error",
-                "message": f"Grok test failed HTTP {r.status_code}: {r.text[:300]}",
-            }
+                return {"status": "ok", "message": "Grok xAI API key valid", "source": source}
+            return {"status": "error", "message": f"Grok test failed HTTP {r.status_code}: {r.text[:300]}", "source": source}
 
-        return {"status": "unknown", "message": f"No test available for {provider}"}
+        return {"status": "unknown", "message": f"No test available for {provider}", "source": source}
 
     except Exception as e:
-        return {"status": "error", "message": str(e)[:500]}
-
-
+        return {"status": "error", "message": str(e)[:500], "source": source}
 
 # --- Automation Engine ---
 try:
