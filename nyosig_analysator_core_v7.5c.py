@@ -3,6 +3,7 @@
 # nyosig_analysator_core_v7.5c -- CORE
 # NyoSig_Analysator -- Core engine
 # Architecture ref: v4.0a  |  Tasklist: IMPLEMENTATION_SYNC_TASKLIST_v2.4a
+# v7.6c hotfix: stocks_spot non-crypto normalisation + no crypto OHLCV cascade for stocks
 # v7.5c changes vs v7.5a:
 #   FIX-1: Integrates v7.5b live-run history/profile logging into the full v7.5a core
 #   FIX-2: Adds run_pipeline() compatibility wrapper without replacing the full analytical core
@@ -589,21 +590,21 @@ def normalise_non_crypto_rows(
         if not sym:
             continue
         rows.append((
-            run_id,
             snapshot_key,
-            sym,
-            timeframe,
-            float(item.get("current_price") or 0),
-            float(item.get("market_cap") or 0),
-            float(item.get("total_volume") or 0),
-            int(item.get("market_cap_rank") or 0),
-            float(item.get("price_change_percentage_24h") or 0),
-            None,   # base_score -- computed later
-            f"{sym}/USD",
-            source,
-            scope,
-            fetched_utc,
             snapshot_ref,
+            run_id,
+            fetched_utc,
+            scope,
+            timeframe,
+            sym,
+            f"{sym}/USD",
+            float(item.get("current_price") or 0),
+            float(item.get("price_change_percentage_24h") or 0),
+            float(item.get("total_volume") or 0),
+            float(item.get("market_cap") or 0),
+            int(item.get("market_cap_rank") or 0),
+            None,   # base_score -- computed later
+            source,
         ))
     return rows
 
@@ -2453,8 +2454,10 @@ def run_snapshot_and_topnow(
             log_cb(f"MacroDashboard: {len(_macro_rows)} instruments set to neutral")
         con.commit()
 
-        # --- OHLCV ingestion (only for crypto and stocks, v7.0a) ---
-        if asset_class in ("crypto", "stocks"):
+        # --- OHLCV ingestion ---
+        # v7.6c: Crypto OHLCV cascade is crypto-only.
+        # Stocks/ETFs must not be sent to CoinGecko, CryptoCompare, or Binance.
+        if asset_class == "crypto":
             ohlcv_timeframes = cfg.get("mvp", {}).get("timeframes", ["1d"])
             if isinstance(ohlcv_timeframes, str):
                 ohlcv_timeframes = [ohlcv_timeframes]
@@ -2466,6 +2469,10 @@ def run_snapshot_and_topnow(
                 paths=paths, log_cb=log_cb,
                 timeframes=ohlcv_timeframes,
             )
+        elif asset_class == "stocks":
+            log_cb("OHLCV ingestion skipped for stocks: Yahoo OHLCV provider is not implemented in this build")
+        elif asset_class == "forex":
+            log_cb("OHLCV ingestion skipped for forex: Yahoo OHLCV provider is not implemented in this build")
 
         # --- TopNow ---
         selection_id, n_items = _topnow_build(
