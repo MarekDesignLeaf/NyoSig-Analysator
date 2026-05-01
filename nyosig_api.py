@@ -45,7 +45,7 @@ paths = _core.make_paths(PROJECT_ROOT)
 for d in [paths.cache_dir, paths.log_dir, paths.data_dir, paths.db_dir]:
     _core.ensure_dir(d)
 
-APP_VERSION = "v7.6c-web"
+APP_VERSION = "v7.6d-web"
 
 # --- FastAPI app ---
 app = FastAPI(

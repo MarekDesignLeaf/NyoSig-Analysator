@@ -219,21 +219,36 @@ elif "Run Pipeline" in page:
             # Show result
             result = status.get("result")
             if result and "error" not in result:
-                st.success(f"✅ Run #{result.get('run_id')} — "
-                          f"{result.get('candidates_n', 0)} candidates")
+                run_id = result.get("run_id")
+                selection_id = result.get("selection_id")
+                candidates_n = int(result.get("candidates_n") or 0)
 
-                # Offer analysis
-                if st.button("📊 Run Analysis Now", type="primary"):
-                    api_post("/analyse", {
-                        "selection_id": result["selection_id"],
-                        "run_id": result["run_id"],
-                    })
-                    st.success("Analysis started!")
+                if run_id and selection_id and candidates_n > 0:
+                    st.success(f"✅ Run #{run_id} — {candidates_n} candidates")
+
+                    if st.button("📊 Run Analysis Now", type="primary"):
+                        api_post("/analyse", {
+                            "selection_id": selection_id,
+                            "run_id": run_id,
+                        })
+                        st.success("Analysis started!")
+                else:
+                    st.warning(
+                        "Pipeline finished, but analysis cannot start because run_id, "
+                        "selection_id, or candidates are missing. This run produced 0 candidates."
+                    )
+                    st.json(result)
+            elif result and "error" in result:
+                st.error(result.get("error"))
 
             # Log
             logs = status.get("log", [])
             if logs:
                 log_placeholder.code("\n".join(logs[-30:]), language="text")
+
+            if state in ("running", "analysing"):
+                time.sleep(3)
+                st.rerun()
 
 
 # --- ANALYSIS & PREDICTIONS ---
